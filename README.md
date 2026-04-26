@@ -73,6 +73,8 @@ Currently used for:
 - Claude config
 - OpenCode auth
 
+`ai-buddy start` mounts `~/.gitconfig` from the host read-only into the container so Git commits use your existing author configuration.
+
 ## Quick Reference
 
 ```bash

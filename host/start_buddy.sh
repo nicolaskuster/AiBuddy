@@ -10,4 +10,5 @@ docker run --rm -it \
   --name "$CONTAINER_NAME" \
   -v "$WORKSPACE:/workspace" \
   -v "ai-buddy-shared:/home/buddy/.ai-buddy" \
+  -v "$HOME/.gitconfig:/home/buddy/.gitconfig:ro" \
   "$IMAGE_NAME"
