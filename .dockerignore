@@ -1,0 +1,6 @@
+**
+!docker/
+!docker/**
+!container/
+!container/**
+!.dockerignore
