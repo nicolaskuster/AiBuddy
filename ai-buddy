@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  if [[ "$SOURCE" != /* ]]; then
+    SOURCE="$SCRIPT_DIR/$SOURCE"
+  fi
+done
+
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+REPO_ROOT="$SCRIPT_DIR"
+
+case "${1:-}" in
+  start)
+    exec "$REPO_ROOT/host/start_buddy.sh"
+    ;;
+  build)
+    exec "$REPO_ROOT/host/build_buddy.sh"
+    ;;
+  *)
+    echo "Usage: $(basename "$0") {start|build}" >&2
+    exit 1
+    ;;
+esac
