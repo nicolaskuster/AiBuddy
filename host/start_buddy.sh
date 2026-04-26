@@ -9,4 +9,5 @@ echo "▶ Starting container..."
 docker run --rm -it \
   --name "$CONTAINER_NAME" \
   -v "$WORKSPACE:/workspace" \
+  -v "ai-buddy-shared:/home/buddy/.ai-buddy" \
   "$IMAGE_NAME"
