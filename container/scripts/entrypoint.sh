@@ -13,17 +13,22 @@ fi
 
 ln -sfn "$CLAUDE_CONFIG_SOURCE" "$CLAUDE_CONFIG_TARGET"
 
-CLAUDE_CREDENTIALS_SOURCE="$HOME/.ai-buddy/.claude/.credentials.json"
-CLAUDE_CREDENTIALS_TARGET="$HOME/.claude/.credentials.json"
+CLAUDE_DIR_SOURCE="$HOME/.ai-buddy/.claude"
+CLAUDE_DIR_TARGET="$HOME/.claude"
 
-mkdir -p "$(dirname "$CLAUDE_CREDENTIALS_SOURCE")"
-mkdir -p "$(dirname "$CLAUDE_CREDENTIALS_TARGET")"
-if [ ! -f "$CLAUDE_CREDENTIALS_SOURCE" ]; then
-  printf '{}\n' > "$CLAUDE_CREDENTIALS_SOURCE"
-  chmod 600 $CLAUDE_CREDENTIALS_SOURCE 
+# On first run (empty volume), seed from the image's initial .claude directory
+if [ ! -d "$CLAUDE_DIR_SOURCE" ] || [ -z "$(ls -A "$CLAUDE_DIR_SOURCE" 2>/dev/null)" ]; then
+  mkdir -p "$CLAUDE_DIR_SOURCE"
+  if [ -d "$CLAUDE_DIR_TARGET" ] && [ ! -L "$CLAUDE_DIR_TARGET" ]; then
+    cp -a "$CLAUDE_DIR_TARGET/." "$CLAUDE_DIR_SOURCE/"
+  fi
 fi
 
-ln -sfn "$CLAUDE_CREDENTIALS_SOURCE" "$CLAUDE_CREDENTIALS_TARGET"
+# Replace the real directory (from the image layer) with a symlink to the volume
+if [ -d "$CLAUDE_DIR_TARGET" ] && [ ! -L "$CLAUDE_DIR_TARGET" ]; then
+  rm -rf "$CLAUDE_DIR_TARGET"
+fi
+ln -sfn "$CLAUDE_DIR_SOURCE" "$CLAUDE_DIR_TARGET"
 
 # ── Opencode: link persistent auth from volume ────────────────────────────────
 OPENCODE_AUTH_SOURCE="$HOME/.ai-buddy/opencode-auth.json"
