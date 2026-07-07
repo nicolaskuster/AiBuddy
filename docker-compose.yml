@@ -1,0 +1,85 @@
+name: ai-buddy
+
+services:
+  # Long-running, shared egress proxy. Holds the only copy of real secrets
+  # and the private key of the internal CA used to inspect/inject into TLS
+  # traffic. Never mount anything from this service's private volume into
+  # the agent.
+  proxy:
+    build:
+      context: .
+      dockerfile: docker/proxy.Dockerfile
+    image: ai-buddy-proxy
+    restart: unless-stopped
+    env_file:
+      # Real secrets live here only. See .env.example.
+      - .env
+    command:
+      - mitmdump
+      - --mode
+      - regular
+      - --listen-port
+      - "8080"
+      - -s
+      - /addons/addon.py
+      - --set
+      - confdir=/home/mitmproxy/.mitmproxy
+      - --set
+      - stream_large_bodies=1
+    volumes:
+      # Private: mitmproxy state incl. CA private key. Proxy-only.
+      - ai-buddy-proxy-data:/home/mitmproxy/.mitmproxy
+      # Public: only the exported CA *public* certificate ends up here.
+      - ai-buddy-proxy-ca:/export-ca
+    networks:
+      - internal
+      - egress
+    healthcheck:
+      # Becomes healthy once the addon has exported the public CA cert -
+      # agent containers depend on this so they don't start before the CA
+      # they need to trust actually exists.
+      test: ["CMD", "test", "-f", "/export-ca/ai-buddy-ca.crt"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+      start_period: 5s
+
+  # Ephemeral, per-project shell. No network access other than the proxy,
+  # no real secrets. Started via `docker compose run --rm agent` (see
+  # host/start_buddy.sh) so many instances can run in parallel for
+  # different project directories.
+  agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        USER_UID: "${USER_UID:-1000}"
+        USER_GID: "${USER_GID:-1000}"
+    image: ai-buddy
+    depends_on:
+      proxy:
+        condition: service_healthy
+    environment:
+      HTTP_PROXY: "http://proxy:8080"
+      HTTPS_PROXY: "http://proxy:8080"
+      NO_PROXY: "localhost,127.0.0.1"
+    volumes:
+      - ai-buddy-shared:/home/buddy/.ai-buddy
+      - ai-buddy-proxy-ca:/usr/local/share/ca-certificates/ai-buddy:ro
+    networks:
+      - internal
+
+networks:
+  # No default route to the internet. The only way out is through `proxy`,
+  # which is dual-homed on both `internal` and `egress`.
+  internal:
+    internal: true
+  egress: {}
+
+volumes:
+  ai-buddy-shared:
+    name: ai-buddy-shared
+  ai-buddy-proxy-data:
+    name: ai-buddy-proxy-data
+  ai-buddy-proxy-ca:
+    name: ai-buddy-proxy-ca

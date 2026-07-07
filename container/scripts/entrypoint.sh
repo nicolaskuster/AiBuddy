@@ -1,46 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ── Claude: link persistent config from volume ────────────────────────────────
-CLAUDE_CONFIG_SOURCE="$HOME/.ai-buddy/.claude.json"
-CLAUDE_CONFIG_TARGET="$HOME/.claude.json"
+# ── Trust the egress proxy's CA certificate (system-wide) ──────────────────
+#
+# The proxy (see docker-compose.yml / container/proxy) terminates TLS for
+# selected hosts to inject secrets that this container never holds itself.
+# For that to work without every tool throwing certificate errors, this
+# container needs to trust the proxy's CA. The public certificate is shared
+# read-only via the `ai-buddy-proxy-ca` volume - the private key never
+# leaves the proxy container.
+#
+# Debian's update-ca-certificates already scans this exact directory for
+# custom CAs, so no copying is required here.
+CA_CERT_FILE="/usr/local/share/ca-certificates/ai-buddy/ai-buddy-ca.crt"
 
-mkdir -p "$(dirname "$CLAUDE_CONFIG_SOURCE")"
-mkdir -p "$(dirname "$CLAUDE_CONFIG_TARGET")"
-if [ ! -f "$CLAUDE_CONFIG_SOURCE" ]; then
-  printf '{}\n' > "$CLAUDE_CONFIG_SOURCE"
+if [ -f "$CA_CERT_FILE" ]; then
+  update-ca-certificates >/dev/null || echo "⚠ ai-buddy: update-ca-certificates failed" >&2
+else
+  echo "⚠ ai-buddy: proxy CA certificate not found at $CA_CERT_FILE - HTTPS calls through the proxy will fail." >&2
+  echo "  Make sure the 'proxy' service is up (docker compose up -d proxy) before starting the agent." >&2
 fi
 
-ln -sfn "$CLAUDE_CONFIG_SOURCE" "$CLAUDE_CONFIG_TARGET"
-
-CLAUDE_DIR_SOURCE="$HOME/.ai-buddy/.claude"
-CLAUDE_DIR_TARGET="$HOME/.claude"
-
-# On first run (empty volume), seed from the image's initial .claude directory
-if [ ! -d "$CLAUDE_DIR_SOURCE" ] || [ -z "$(ls -A "$CLAUDE_DIR_SOURCE" 2>/dev/null)" ]; then
-  mkdir -p "$CLAUDE_DIR_SOURCE"
-  if [ -d "$CLAUDE_DIR_TARGET" ] && [ ! -L "$CLAUDE_DIR_TARGET" ]; then
-    cp -a "$CLAUDE_DIR_TARGET/." "$CLAUDE_DIR_SOURCE/"
-  fi
-fi
-
-# Replace the real directory (from the image layer) with a symlink to the volume
-if [ -d "$CLAUDE_DIR_TARGET" ] && [ ! -L "$CLAUDE_DIR_TARGET" ]; then
-  rm -rf "$CLAUDE_DIR_TARGET"
-fi
-ln -sfn "$CLAUDE_DIR_SOURCE" "$CLAUDE_DIR_TARGET"
-
-# ── Opencode: link persistent auth from volume ────────────────────────────────
-OPENCODE_AUTH_SOURCE="$HOME/.ai-buddy/opencode-auth.json"
-OPENCODE_AUTH_TARGET="$HOME/.local/share/opencode/auth.json"
-
-mkdir -p "$(dirname "$OPENCODE_AUTH_SOURCE")"
-mkdir -p "$(dirname "$OPENCODE_AUTH_TARGET")"
-if [ ! -f "$OPENCODE_AUTH_SOURCE" ]; then
-  printf '{}\n' > "$OPENCODE_AUTH_SOURCE"
-fi
-
-ln -sfn "$OPENCODE_AUTH_SOURCE" "$OPENCODE_AUTH_TARGET"
-
-# ── Handoff: run the container command ────────────────────────────────────────
-exec "$@"
+# ── Drop privileges and continue as the non-root user ───────────────────────
+# This container starts as root only for the update-ca-certificates step
+# above. Everything else runs as ${USER_NAME} (see entrypoint-user.sh).
+exec gosu "${USER_NAME:-buddy}" /usr/local/bin/entrypoint-user.sh "$@"

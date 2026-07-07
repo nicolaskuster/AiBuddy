@@ -13,6 +13,7 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
+        gosu \
         libicu-dev \
         procps \
         wget \
@@ -38,7 +39,8 @@ RUN chmod +x /usr/local/bin/welcome.sh \
 
 # Entrypoint
 COPY ./container/scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY ./container/scripts/entrypoint-user.sh /usr/local/bin/entrypoint-user.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/entrypoint-user.sh
 
 WORKDIR /workspace
 RUN chown ${USER_NAME}:${USER_NAME} /workspace \
@@ -48,6 +50,7 @@ RUN chown ${USER_NAME}:${USER_NAME} /workspace \
 # Switch to non-root user for the CLI installs
 USER ${USER_NAME}
 ENV HOME=/home/${USER_NAME}
+ENV USER_NAME=${USER_NAME}
 ENV PATH="/home/${USER_NAME}/.local/bin:/home/${USER_NAME}/.opencode/bin:${PATH}"
 
 # Install OpenCode CLI
@@ -57,6 +60,11 @@ RUN curl -fsSL https://opencode.ai/install | bash \
 # Install Claude Code CLI
 RUN curl -fsSL https://claude.ai/install.sh | bash \
     && claude --version
+
+# The container starts as root so the entrypoint can trust the egress
+# proxy's CA certificate system-wide (update-ca-certificates) before
+# dropping privileges to ${USER_NAME} via gosu. See entrypoint.sh.
+USER root
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["/bin/bash"]

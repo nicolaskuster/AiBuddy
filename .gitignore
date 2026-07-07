@@ -1,1 +1,4 @@
 .idea/
+
+# Local secrets for the egress proxy (see .env.example) - never commit this.
+.env

@@ -1,0 +1,18 @@
+# Host -> header injection rules for the egress proxy (container/proxy/addon.py).
+#
+# For every host listed here, the configured headers are added/overwritten
+# on the way out, with values resolved from the *proxy container's own*
+# environment (see .env.example) - never from anything the client sends.
+# `strip_headers` removes headers the client may have set on its own before
+# our values are applied, so a leaked/placeholder value can never slip
+# through to the upstream service.
+#
+# Hosts NOT listed here are forwarded unmodified (default-allow). This will
+# get an allow/deny policy and request logging (OTel) in a later iteration.
+
+rules:
+  - host: api.anthropic.com
+    set_headers:
+      x-api-key: "${ANTHROPIC_API_KEY}"
+    strip_headers:
+      - authorization
