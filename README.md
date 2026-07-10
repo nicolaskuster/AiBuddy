@@ -65,6 +65,17 @@ Your project directory will then be available inside the container at `/workspac
 
 `ai-buddy start` mounts `~/.gitconfig` from the host read-only into the container so Git commits use your existing author configuration.
 
+## Network Isolation & Proxy
+
+The agent container is attached to an internal Docker network (`agent-net`, subnet `100.100.0.0/24`) with no direct route to the internet. All outbound traffic goes through the `proxy` service, a [mitmproxy](https://mitmproxy.org/) container reachable at the static IP `100.100.0.10:8080` (set via `HTTP_PROXY`/`HTTPS_PROXY` in the agent).
+
+Currently the proxy runs as a pure passthrough tunnel (`--ignore-hosts '.*'`) — TLS is not intercepted, so no CA setup is needed inside the agent. This is the place where token injection and request logging/tracing will be added later (requires enabling TLS interception and trusting the mitmproxy CA in the agent).
+
+Notes:
+- `ai-buddy start` starts the proxy automatically (compose dependency). The proxy keeps running after the agent session ends and is shared by parallel sessions.
+- Stop it with `docker compose -f docker-compose.yml down`.
+- Inspect proxied traffic with `docker compose -f docker-compose.yml logs proxy`.
+
 ## Quick Reference
 
 ```bash

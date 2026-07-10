@@ -8,9 +8,34 @@ services:
       args:
         USER_UID: "${USER_UID:-1000}"
         USER_GID: "${USER_GID:-1000}"
+    environment:
+      HTTP_PROXY: http://100.100.0.10:8080
+      http_proxy: http://100.100.0.10:8080
+      HTTPS_PROXY: http://100.100.0.10:8080
+      https_proxy: http://100.100.0.10:8080
+      NO_PROXY: localhost,127.0.0.1
+      no_proxy: localhost,127.0.0.1
+    depends_on:
+      - proxy
     networks:
       agent-net:
+    dns:
+      - 100.100.0.10
+
+  proxy:
+    image: mitmproxy/mitmproxy:12
+    command: mitmdump --mode regular --listen-host 0.0.0.0 --listen-port 8080 --ignore-hosts '.*'
+    networks:
+      agent-net:
+        ipv4_address: 100.100.0.10
+      proxy-net:
 
 networks:
   agent-net:
+    driver: bridge
     internal: true
+    ipam:
+      config:
+        - subnet: 100.100.0.0/24
+  proxy-net:
+    driver: bridge
