@@ -32,13 +32,9 @@ RUN mkdir -p ${DOTNET_INSTALL_DIR} \
     && dotnet --version
 
 # Welcome message (system-wide hook)
-COPY ./container/scripts/welcome.sh /usr/local/bin/welcome.sh
+COPY ./welcome.sh /usr/local/bin/welcome.sh
 RUN chmod +x /usr/local/bin/welcome.sh \
     && echo '/usr/local/bin/welcome.sh' >> /etc/bash.bashrc
-
-# Entrypoint
-COPY ./container/scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
 
 WORKDIR /workspace
 RUN chown ${USER_NAME}:${USER_NAME} /workspace \
@@ -58,5 +54,4 @@ RUN curl -fsSL https://opencode.ai/install | bash \
 RUN curl -fsSL https://claude.ai/install.sh | bash \
     && claude --version
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["/bin/bash"]

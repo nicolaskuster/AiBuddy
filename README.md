@@ -29,7 +29,7 @@ Start the container in your current directory:
 ```
 
 Important:
-- `build` always uses this repository as the Docker build context.
+- `build` builds the `agent` image via `docker compose` using `containers/Agent/` as the Docker build context.
 - `start` always mounts your current directory into the container as `/workspace`.
 - That means you can run `ai-buddy start` from any project directory.
 
@@ -61,17 +61,7 @@ ai-buddy start
 
 Your project directory will then be available inside the container at `/workspace`.
 
-## Persistent AI Config
-
-The container mounts a Docker volume:
-
-- `ai-buddy-shared:/home/buddy/.ai-buddy`
-
-This keeps AI-related config files across container restarts.
-
-Currently used for:
-- Claude config
-- OpenCode auth
+## Git Config
 
 `ai-buddy start` mounts `~/.gitconfig` from the host read-only into the container so Git commits use your existing author configuration.
 
