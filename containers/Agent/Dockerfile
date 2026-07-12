@@ -37,9 +37,7 @@ RUN chmod +x /usr/local/bin/welcome.sh \
     && echo '/usr/local/bin/welcome.sh' >> /etc/bash.bashrc
 
 WORKDIR /workspace
-RUN chown ${USER_NAME}:${USER_NAME} /workspace \
-    && mkdir -p /home/${USER_NAME}/.ai-buddy \
-    && chown ${USER_NAME}:${USER_NAME} /home/${USER_NAME}/.ai-buddy
+RUN chown ${USER_NAME}:${USER_NAME} /workspace
 
 # Switch to non-root user for the CLI installs
 USER ${USER_NAME}
