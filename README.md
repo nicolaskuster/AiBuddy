@@ -5,6 +5,7 @@
 Included tools:
 - `claude`
 - `opencode`
+- `pi`
 - `.NET SDK`
 
 The main entry point is the `ai-buddy` script.

@@ -18,6 +18,13 @@ RUN apt-get update \
         procps \
     && rm -rf /var/lib/apt/lists/*
 
+# Install Node.js for the Pi coding agent.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version \
+    && npm --version
+
 # Create non-root user
 RUN groupadd -g ${USER_GID} buddy \
     && useradd -m -u ${USER_UID} -g ${USER_GID} -s /bin/bash buddy
@@ -42,6 +49,9 @@ ENV PATH="/home/buddy/.local/bin:/home/buddy/.opencode/bin:${PATH}"
 
 RUN curl -fsSL https://opencode.ai/install | bash \
     && opencode --version
+
+RUN curl -fsSL https://pi.dev/install.sh | bash \
+    && pi --version
 
 RUN curl -fsSL https://claude.ai/install.sh | bash \
     && claude --version
