@@ -7,6 +7,7 @@ import logging
 from pathlib import Path
 
 from claude_code_auth import ClaudeCodeAuthInterceptor
+from github_copilot_auth import GitHubCopilotAuthInterceptor
 
 logger = logging.getLogger(__name__)
 
@@ -62,4 +63,8 @@ class PublicCaExporter:
             self._export_task.cancel()
 
 
-addons = [PublicCaExporter(), ClaudeCodeAuthInterceptor()]
+addons = [
+    PublicCaExporter(),
+    ClaudeCodeAuthInterceptor(),
+    GitHubCopilotAuthInterceptor(),
+]
