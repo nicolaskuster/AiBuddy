@@ -1,10 +1,11 @@
 FROM debian:bookworm-slim
 
-ARG USER_NAME=buddy
 ARG USER_UID=1000
 ARG USER_GID=1000
 ARG DOTNET_VERSION=10.0
 ARG DOTNET_INSTALL_DIR=/usr/share/dotnet
+ENV HOME=/home/buddy
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/ai-buddy-ca.crt
 
 # Install system dependencies
 RUN apt-get update \
@@ -13,43 +14,44 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
-        libicu-dev \
+        libicu72 \
         procps \
-        wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
-RUN groupadd -g ${USER_GID} ${USER_NAME} \
-    && useradd -m -u ${USER_UID} -g ${USER_GID} -s /bin/bash ${USER_NAME}
+RUN groupadd -g ${USER_GID} buddy \
+    && useradd -m -u ${USER_UID} -g ${USER_GID} -s /bin/bash buddy
+
+# Welcome message (system-wide hook)
+COPY --chmod=755 welcome.sh /usr/local/bin/welcome.sh
+RUN echo '/usr/local/bin/welcome.sh' >> /etc/bash.bashrc
+
+WORKDIR /workspace
 
 # Install .NET (system-wide)
 RUN mkdir -p ${DOTNET_INSTALL_DIR} \
-    && wget -q https://builds.dotnet.microsoft.com/dotnet/scripts/v1/dotnet-install.sh -O ${DOTNET_INSTALL_DIR}/dotnet-install.sh \
-    && chmod +x ${DOTNET_INSTALL_DIR}/dotnet-install.sh \
+    && curl -fsSL https://builds.dotnet.microsoft.com/dotnet/scripts/v1/dotnet-install.sh -o ${DOTNET_INSTALL_DIR}/dotnet-install.sh \
     && bash ${DOTNET_INSTALL_DIR}/dotnet-install.sh --version latest --channel ${DOTNET_VERSION} --install-dir ${DOTNET_INSTALL_DIR} \
     && ln -s ${DOTNET_INSTALL_DIR}/dotnet /usr/bin/dotnet \
     && rm ${DOTNET_INSTALL_DIR}/dotnet-install.sh \
     && dotnet --version
 
-# Welcome message (system-wide hook)
-COPY ./welcome.sh /usr/local/bin/welcome.sh
-RUN chmod +x /usr/local/bin/welcome.sh \
-    && echo '/usr/local/bin/welcome.sh' >> /etc/bash.bashrc
+# Install the agent CLIs as the unprivileged user.
+USER buddy
+ENV PATH="/home/buddy/.local/bin:/home/buddy/.opencode/bin:${PATH}"
 
-WORKDIR /workspace
-RUN chown ${USER_NAME}:${USER_NAME} /workspace
-
-# Switch to non-root user for the CLI installs
-USER ${USER_NAME}
-ENV HOME=/home/${USER_NAME}
-ENV PATH="/home/${USER_NAME}/.local/bin:/home/${USER_NAME}/.opencode/bin:${PATH}"
-
-# Install OpenCode CLI
 RUN curl -fsSL https://opencode.ai/install | bash \
     && opencode --version
 
-# Install Claude Code CLI
 RUN curl -fsSL https://claude.ai/install.sh | bash \
     && claude --version
 
+USER root
+
+# ── Entrypoint: trust the proxy CA at container start, then drop to buddy ───
+# Needs root to update the system trust store (see entrypoint.sh); it execs
+# the actual CMD as buddy via runuser once that's done.
+COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["/bin/bash"]

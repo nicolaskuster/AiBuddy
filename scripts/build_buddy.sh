@@ -8,4 +8,4 @@ export USER_UID="$(id -u)"
 export USER_GID="$(id -g)"
 
 echo "⚙ Building AI Buddy with UID=$USER_UID and GID=$USER_GID..."
-docker compose -f "$REPO_ROOT/docker-compose.yml" build --no-cache
+docker compose -f "$REPO_ROOT/docker-compose.yml" build

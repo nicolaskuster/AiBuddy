@@ -4,7 +4,6 @@ services:
   agent:
     build:
       context: containers/Agent/
-      dockerfile: Dockerfile
       args:
         USER_UID: "${USER_UID:-1000}"
         USER_GID: "${USER_GID:-1000}"
@@ -16,21 +15,46 @@ services:
       NO_PROXY: localhost,127.0.0.1
       no_proxy: localhost,127.0.0.1
     volumes:
-      - ai-buddy-home:/home/buddy
+      - agent-home:/home/buddy
+      - proxy-ca:/run/ai-buddy-ca:ro
+      - type: bind
+        source: ${HOME}/.gitconfig
+        target: /home/buddy/.gitconfig
+        read_only: true
+        bind:
+          create_host_path: false
     depends_on:
-      - proxy
+      proxy:
+        condition: service_healthy
     networks:
       agent-net:
     dns:
       - 100.100.0.10
+    init: true
+    security_opt:
+      - no-new-privileges:true
 
   proxy:
-    image: mitmproxy/mitmproxy:12
-    command: mitmdump --mode regular --listen-host 0.0.0.0 --listen-port 8080 --ignore-hosts '.*'
+    build:
+      context: containers/proxy/
+    volumes:
+      - proxy-config:/home/mitmproxy/.mitmproxy
+      - proxy-ca:/home/mitmproxy/.mitmproxy-public
     networks:
       agent-net:
         ipv4_address: 100.100.0.10
       proxy-net:
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          cmp -s /home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem
+          /home/mitmproxy/.mitmproxy-public/ai-buddy-ca.crt &&
+          python -c "import socket; [socket.create_connection(('127.0.0.1', port), 1).close() for port in (53, 8080)]"
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
 
 networks:
   agent-net:
@@ -43,4 +67,6 @@ networks:
     driver: bridge
 
 volumes:
-  ai-buddy-home:
+  agent-home:
+  proxy-ca:
+  proxy-config:
