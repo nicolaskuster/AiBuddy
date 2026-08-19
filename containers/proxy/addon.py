@@ -6,6 +6,8 @@ import asyncio
 import logging
 from pathlib import Path
 
+from claude_code_auth import ClaudeCodeAuthInterceptor
+
 logger = logging.getLogger(__name__)
 
 MITM_CA_CERT = Path("/home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem")
@@ -60,4 +62,4 @@ class PublicCaExporter:
             self._export_task.cancel()
 
 
-addons = [PublicCaExporter()]
+addons = [PublicCaExporter(), ClaudeCodeAuthInterceptor()]

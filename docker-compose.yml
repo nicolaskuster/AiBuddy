@@ -40,6 +40,7 @@ services:
     volumes:
       - proxy-config:/home/mitmproxy/.mitmproxy
       - proxy-ca:/home/mitmproxy/.mitmproxy-public
+      - proxy-secrets:/home/mitmproxy/.mitmproxy-token
     networks:
       agent-net:
         ipv4_address: 100.100.0.10
@@ -70,3 +71,4 @@ volumes:
   agent-home:
   proxy-ca:
   proxy-config:
+  proxy-secrets:
