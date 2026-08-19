@@ -1,0 +1,74 @@
+name: ai-buddy
+
+services:
+  agent:
+    build:
+      context: containers/Agent/
+      args:
+        USER_UID: "${USER_UID:-1000}"
+        USER_GID: "${USER_GID:-1000}"
+    environment:
+      HTTP_PROXY: http://100.100.0.10:8080
+      http_proxy: http://100.100.0.10:8080
+      HTTPS_PROXY: http://100.100.0.10:8080
+      https_proxy: http://100.100.0.10:8080
+      NO_PROXY: localhost,127.0.0.1
+      no_proxy: localhost,127.0.0.1
+    volumes:
+      - agent-home:/home/buddy
+      - proxy-ca:/run/ai-buddy-ca:ro
+      - type: bind
+        source: ${HOME}/.gitconfig
+        target: /home/buddy/.gitconfig
+        read_only: true
+        bind:
+          create_host_path: false
+    depends_on:
+      proxy:
+        condition: service_healthy
+    networks:
+      agent-net:
+    dns:
+      - 100.100.0.10
+    init: true
+    security_opt:
+      - no-new-privileges:true
+
+  proxy:
+    build:
+      context: containers/proxy/
+    volumes:
+      - proxy-config:/home/mitmproxy/.mitmproxy
+      - proxy-ca:/home/mitmproxy/.mitmproxy-public
+      - proxy-secrets:/home/mitmproxy/.mitmproxy-token
+    networks:
+      agent-net:
+        ipv4_address: 100.100.0.10
+      proxy-net:
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          cmp -s /home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem
+          /home/mitmproxy/.mitmproxy-public/ai-buddy-ca.crt &&
+          python -c "import socket; [socket.create_connection(('127.0.0.1', port), 1).close() for port in (53, 8080)]"
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+
+networks:
+  agent-net:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 100.100.0.0/24
+  proxy-net:
+    driver: bridge
+
+volumes:
+  agent-home:
+  proxy-ca:
+  proxy-config:
+  proxy-secrets:

@@ -20,6 +20,7 @@ cat << EOF
    🔧  Installed CLIs Agents - Ready to Use:
       • Claude CLI    → claude
       • OpenCode CLI  → opencode
+      • Pi CLI        → pi
 
   🤖 ═══════════════════════════════════════════════════════════ 🤖
 
