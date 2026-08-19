@@ -1,14 +1,21 @@
-"""Keep real GitHub Copilot OAuth tokens inside the proxy process."""
+"""Keep real GitHub Copilot OAuth tokens inside the proxy process.
+
+The agent only ever holds stub tokens. Real tokens are injected only into
+requests whose *actual upstream host* (``request.host``, not the spoofable
+``pretty_host``) is an authorized Copilot endpoint, and captured token
+responses are stubbed fail-closed so a real token never reaches the agent.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode
 
 from mitmproxy import http
+
+from token_store import OAuthBrokerAddon
 
 logger = logging.getLogger(__name__)
 
@@ -28,26 +35,17 @@ STUB_SESSION_TOKEN = (
 )
 
 
-class GitHubCopilotAuthInterceptor:
+class GitHubCopilotAuthInterceptor(OAuthBrokerAddon):
+    label = "GitHub Copilot"
+    store_path = TOKEN_STORE
+
     def __init__(self) -> None:
         self._access_token: str | None = None
         self._session_token: str | None = None
         self._session_stub_token = STUB_SESSION_TOKEN
         self._session_api_host: str | None = None
 
-    def load(self, loader) -> None:
-        try:
-            tokens = json.loads(TOKEN_STORE.read_text())
-        except FileNotFoundError:
-            return
-        except (OSError, TypeError, ValueError) as exc:
-            logger.warning("[ai-buddy] could not read GitHub Copilot token store: %s", exc)
-            return
-
-        if not isinstance(tokens, dict):
-            logger.warning("[ai-buddy] GitHub Copilot token store has an invalid format")
-            return
-
+    def _apply_stored_tokens(self, tokens: dict) -> None:
         access_token = tokens.get("access_token")
         session_token = tokens.get("session_token")
         if isinstance(access_token, str) and access_token:
@@ -66,69 +64,79 @@ class GitHubCopilotAuthInterceptor:
             return
 
         if authorization == f"Bearer {STUB_ACCESS_TOKEN}":
-            if self._access_token:
-                flow.request.headers["authorization"] = f"Bearer {self._access_token}"
-                return
-
-            flow.response = http.Response.make(
-                401,
-                b"GitHub Copilot OAuth token mapping is not available; re-login required",
-                {"content-type": "text/plain"},
-            )
+            self._inject(flow, self._access_token, "OAuth")
             return
 
         if authorization == f"Bearer {self._session_stub_token}":
-            if self._session_token:
-                flow.request.headers["authorization"] = f"Bearer {self._session_token}"
-                return
+            self._inject(flow, self._session_token, "session")
+            return
 
-            flow.response = http.Response.make(
-                401,
-                b"GitHub Copilot session token mapping is not available; re-login required",
-                {"content-type": "text/plain"},
-            )
+        # Fail-closed: an authorized Copilot host must only ever see our stubs.
+        # Any other bearer is anomalous and rejected so a real token cannot be
+        # smuggled back out through this path.
+        flow.response = self._reject(
+            "ai-buddy: unexpected credential on Copilot host; "
+            "only stub tokens are allowed"
+        )
+
+    def _inject(self, flow: http.HTTPFlow, real_token: str | None, kind: str) -> None:
+        if real_token:
+            flow.request.headers["authorization"] = f"Bearer {real_token}"
+            return
+
+        flow.response = self._reject(
+            f"GitHub Copilot {kind} token mapping is not available; re-login required"
+        )
 
     def _is_authorized_host(self, request: http.Request) -> bool:
-        if request.pretty_host in API_HOSTS:
+        # Gate on the real upstream host, never the spoofable Host header.
+        if request.host in API_HOSTS:
             return True
 
-        if self._session_api_host and request.pretty_host == self._session_api_host:
+        if self._session_api_host and request.host == self._session_api_host:
             return True
 
         return (
-            request.pretty_host == TOKEN_EXCHANGE_HOST
+            request.host == TOKEN_EXCHANGE_HOST
             and request.path.startswith(TOKEN_EXCHANGE_PATH_PREFIX)
         )
 
     def response(self, flow: http.HTTPFlow) -> None:
-        if flow.response is None or not flow.response.content:
+        if flow.response is None:
             return
 
         if self._is_token_request(flow.request):
-            self._capture_oauth_token(flow.response)
+            self._sanitize_oauth_response(flow.response)
         elif self._is_token_exchange_request(flow.request):
-            self._capture_session_token(flow.response)
+            self._sanitize_session_response(flow.response)
 
-    def _capture_oauth_token(self, response: http.Response) -> None:
+    def _sanitize_oauth_response(self, response: http.Response) -> None:
+        if not response.content:
+            return
+
         content_type = response.headers.get("content-type", "").lower()
         if "json" in content_type:
-            self._capture_json_oauth_token(response)
+            if not self._capture_json_oauth_token(response):
+                self._block(response, "OAuth token response could not be sanitized")
         elif "application/x-www-form-urlencoded" in content_type:
             self._capture_form_oauth_token(response)
+        else:
+            # Unknown format from the OAuth endpoint could carry the token in a
+            # shape we do not stub; never forward it to the agent.
+            self._block(response, "OAuth token response could not be sanitized")
 
-    def _capture_json_oauth_token(self, response: http.Response) -> None:
+    def _capture_json_oauth_token(self, response: http.Response) -> bool:
         body = self._parse_json_object(response)
         if body is None:
-            return
+            return False
 
         access_token = body.get("access_token")
-        if not isinstance(access_token, str) or not access_token:
-            return
-
-        self._access_token = access_token
-        body["access_token"] = STUB_ACCESS_TOKEN
-        self._persist_token()
-        response.text = json.dumps(body)
+        if isinstance(access_token, str) and access_token:
+            self._access_token = access_token
+            body["access_token"] = STUB_ACCESS_TOKEN
+            self._persist_token()
+            response.text = json.dumps(body)
+        return True
 
     def _capture_form_oauth_token(self, response: http.Response) -> None:
         fields = parse_qsl(response.get_text(), keep_blank_values=True)
@@ -148,13 +156,18 @@ class GitHubCopilotAuthInterceptor:
             ]
         )
 
-    def _capture_session_token(self, response: http.Response) -> None:
+    def _sanitize_session_response(self, response: http.Response) -> None:
+        if not response.content:
+            return
+
         body = self._parse_json_object(response)
         if body is None:
+            self._block(response, "session token response could not be sanitized")
             return
 
         token = body.get("token")
         if not isinstance(token, str) or not token:
+            # No token present (e.g. an error response); safe to pass through.
             return
 
         self._session_token = token
@@ -193,46 +206,23 @@ class GitHubCopilotAuthInterceptor:
         return None
 
     @staticmethod
-    def _parse_json_object(response: http.Response) -> dict | None:
-        try:
-            body = json.loads(response.get_text())
-        except (TypeError, ValueError):
-            return None
-        return body if isinstance(body, dict) else None
-
-    @staticmethod
     def _is_token_exchange_request(request: http.Request) -> bool:
         return (
-            request.pretty_host == TOKEN_EXCHANGE_HOST
+            request.host == TOKEN_EXCHANGE_HOST
             and request.path.startswith(TOKEN_EXCHANGE_PATH_PREFIX)
         )
 
     @staticmethod
     def _is_token_request(request: http.Request) -> bool:
         return (
-            request.pretty_host == TOKEN_HOST
+            request.host == TOKEN_HOST
             and request.path.split("?", 1)[0] == TOKEN_PATH
         )
 
     def _persist_token(self) -> None:
-        temporary_store = TOKEN_STORE.with_suffix(".tmp")
-
-        try:
-            TOKEN_STORE.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(
-                temporary_store,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                0o600,
-            )
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "w") as file:
-                json.dump(
-                    {
-                        "access_token": self._access_token,
-                        "session_token": self._session_token,
-                    },
-                    file,
-                )
-            temporary_store.replace(TOKEN_STORE)
-        except OSError as exc:
-            logger.warning("[ai-buddy] could not persist GitHub Copilot token: %s", exc)
+        self._persist(
+            {
+                "access_token": self._access_token,
+                "session_token": self._session_token,
+            }
+        )

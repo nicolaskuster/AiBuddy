@@ -75,7 +75,7 @@ mitmproxy provides two listeners on its static IP `100.100.0.10`:
 - TCP `8080` is the regular HTTP/HTTPS proxy selected through `HTTP_PROXY` and `HTTPS_PROXY`.
 - TCP/UDP `53` is the DNS server selected through the container's DNS configuration.
 
-TLS is intercepted so HTTP, HTTPS, and DNS traffic can be inspected with mitmproxy. For Claude Code and OpenCode's GitHub Copilot provider, the proxy captures real OAuth tokens, persists them in a proxy-only volume, and replaces them with placeholder tokens before responses reach the agent. It restores the real tokens only on requests to the corresponding APIs.
+TLS is intercepted so HTTP, HTTPS, and DNS traffic can be inspected with mitmproxy. For Claude Code and OpenCode's GitHub Copilot provider, the proxy captures real OAuth tokens, persists them in a proxy-only volume, and replaces them with placeholder tokens before responses reach the agent. It restores the real tokens only on requests whose actual upstream host (the connection target, not the spoofable `Host` header) is the corresponding API or OAuth endpoint. Requests to those hosts that carry any bearer other than the expected placeholder are rejected, and a token response the proxy cannot safely stub is blocked rather than forwarded, so a real token never reaches the agent.
 
 The proxy exports only its public CA certificate through a shared volume. The agent entrypoint installs that certificate into its system trust store before dropping privileges. Startup fails closed if the proxy or CA is not ready, and the CA private key remains in a proxy-only volume.
 
@@ -91,7 +91,9 @@ Notes:
 - From the AI Buddy repository, stop it with `docker compose -f docker-compose.yml down`.
 - From the AI Buddy repository, inspect traffic with `docker compose -f docker-compose.yml logs proxy`.
 
-Security follow-up: the Claude Code and GitHub Copilot interceptors are not yet fail-closed. Unexpected real credentials or requests made while the proxy has no stored credential may currently be forwarded unchanged. A future iteration must reject unknown credentials and migrate existing real credentials out of persistent agent homes.
+Scope of the guarantee: "secretless" here means the real secret bytes never live inside the agent container — the goal is that the agent cannot learn its own credentials. It is not a sandbox against a compromised or prompt-injected agent: egress is intentionally unrestricted, so the agent can still use the credential's *capabilities* through the proxy and can exfiltrate other data it can read (workspace contents, etc.). The token *values* are what stays protected.
+
+The interceptors are fail-closed on the paths that could leak a token value: injection is gated on the real upstream host, non-placeholder bearers on an authorized host are rejected, and token responses that cannot be safely stubbed are blocked. Remaining follow-up: existing real credentials that may already sit in a persistent `agent-home` volume from before this scheme should be migrated out, and credentials remain shared globally across all agent sessions through the long-running proxy.
 
 ## Quick Reference
 

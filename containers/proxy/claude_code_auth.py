@@ -1,14 +1,20 @@
-"""Keep real Claude Code OAuth tokens inside the proxy process."""
+"""Keep real Claude Code OAuth tokens inside the proxy process.
+
+The agent only ever holds stub tokens. Real tokens live here and are injected
+only into requests whose *actual upstream host* (``request.host``, not the
+spoofable ``pretty_host``) is the Anthropic API or the OAuth token endpoint.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode
 
 from mitmproxy import http
+
+from token_store import OAuthBrokerAddon
 
 logger = logging.getLogger(__name__)
 
@@ -21,24 +27,15 @@ STUB_ACCESS_TOKEN = "sk-ant-oat01-STUB000000000000000000000000000000000000000000
 STUB_REFRESH_TOKEN = "sk-ant-ort01-STUB000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000-AA"
 
 
-class ClaudeCodeAuthInterceptor:
+class ClaudeCodeAuthInterceptor(OAuthBrokerAddon):
+    label = "Claude Code"
+    store_path = TOKEN_STORE
+
     def __init__(self) -> None:
         self._access_token: str | None = None
         self._refresh_token: str | None = None
 
-    def load(self, loader) -> None:
-        try:
-            tokens = json.loads(TOKEN_STORE.read_text())
-        except FileNotFoundError:
-            return
-        except (OSError, TypeError, ValueError) as exc:
-            logger.warning("[ai-buddy] could not read Claude Code token store: %s", exc)
-            return
-
-        if not isinstance(tokens, dict):
-            logger.warning("[ai-buddy] Claude Code token store has an invalid format")
-            return
-
+    def _apply_stored_tokens(self, tokens: dict) -> None:
         access_token = tokens.get("access_token")
         refresh_token = tokens.get("refresh_token")
         if isinstance(access_token, str) and access_token:
@@ -47,8 +44,8 @@ class ClaudeCodeAuthInterceptor:
             self._refresh_token = refresh_token
 
     def request(self, flow: http.HTTPFlow) -> None:
-        if flow.request.pretty_host == API_HOST:
-            self._replace_api_access_token(flow.request)
+        if flow.request.host == API_HOST:
+            self._broker_api_request(flow)
             return
 
         if not self._is_token_request(flow.request):
@@ -57,29 +54,42 @@ class ClaudeCodeAuthInterceptor:
         self._replace_refresh_token(flow.request)
 
     def response(self, flow: http.HTTPFlow) -> None:
-        if (
-            not self._is_token_request(flow.request)
-            or flow.response is None
-            or not flow.response.content
-        ):
+        if not self._is_token_request(flow.request) or flow.response is None:
             return
 
-        self._capture_and_replace_tokens(flow.response)
+        self._sanitize_token_response(flow.response)
 
     @staticmethod
     def _is_token_request(request: http.Request) -> bool:
+        # Gate on the real upstream host, never the spoofable Host header.
         return (
-            request.pretty_host == TOKEN_HOST
+            request.host == TOKEN_HOST
             and request.path.split("?", 1)[0] == TOKEN_PATH
         )
 
-    def _replace_api_access_token(self, request: http.Request) -> None:
-        if (
-            self._access_token
-            and request.headers.get("authorization")
-            == f"Bearer {STUB_ACCESS_TOKEN}"
-        ):
-            request.headers["authorization"] = f"Bearer {self._access_token}"
+    def _broker_api_request(self, flow: http.HTTPFlow) -> None:
+        authorization = flow.request.headers.get("authorization")
+        if authorization is None:
+            # Nothing brokered here (e.g. an x-api-key request); leave it alone.
+            return
+
+        if authorization != f"Bearer {STUB_ACCESS_TOKEN}":
+            # Fail-closed: on the Anthropic API host the agent must only ever
+            # carry the stub. Any other bearer is anomalous and rejected so a
+            # real token cannot be smuggled back out through this path.
+            flow.response = self._reject(
+                "ai-buddy: unexpected credential on Anthropic API host; "
+                "only stub tokens are allowed"
+            )
+            return
+
+        if not self._access_token:
+            flow.response = self._reject(
+                "Claude Code OAuth token mapping is not available; re-login required"
+            )
+            return
+
+        flow.request.headers["authorization"] = f"Bearer {self._access_token}"
 
     def _replace_refresh_token(self, request: http.Request) -> None:
         if not self._refresh_token or not request.content:
@@ -118,17 +128,21 @@ class ClaudeCodeAuthInterceptor:
             ]
         )
 
-    def _capture_and_replace_tokens(self, response: http.Response) -> None:
-        try:
-            body = json.loads(response.get_text())
-        except (TypeError, ValueError):
+    def _sanitize_token_response(self, response: http.Response) -> None:
+        if not response.content:
             return
 
-        if not isinstance(body, dict):
+        body = self._parse_json_object(response)
+        if body is None:
+            # The OAuth token endpoint answers with JSON. Anything else could be
+            # carrying the real token in a shape we do not stub, so never forward
+            # it to the agent.
+            self._block(response, "token response could not be sanitized; blocked")
             return
 
         access_token = body.get("access_token")
         if not isinstance(access_token, str) or not access_token:
+            # No token present (e.g. an error response); safe to pass through.
             return
 
         self._access_token = access_token
@@ -143,22 +157,9 @@ class ClaudeCodeAuthInterceptor:
         response.text = json.dumps(body)
 
     def _persist_tokens(self) -> None:
-        tokens = {
-            "access_token": self._access_token,
-            "refresh_token": self._refresh_token,
-        }
-        temporary_store = TOKEN_STORE.with_suffix(".tmp")
-
-        try:
-            TOKEN_STORE.parent.mkdir(parents=True, exist_ok=True)
-            descriptor = os.open(
-                temporary_store,
-                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
-                0o600,
-            )
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "w") as file:
-                json.dump(tokens, file)
-            temporary_store.replace(TOKEN_STORE)
-        except OSError as exc:
-            logger.warning("[ai-buddy] could not persist Claude Code tokens: %s", exc)
+        self._persist(
+            {
+                "access_token": self._access_token,
+                "refresh_token": self._refresh_token,
+            }
+        )
