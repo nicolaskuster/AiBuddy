@@ -14,7 +14,7 @@ fi
 
 if ! cmp -s "$CA_SRC" "$CA_DST" 2>/dev/null; then
   cp "$CA_SRC" "$CA_DST"
-  update-ca-certificates
+  update-ca-certificates >/dev/null
 fi
 
 exec runuser -u buddy -- "$@"
