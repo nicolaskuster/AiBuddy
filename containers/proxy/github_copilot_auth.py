@@ -9,18 +9,18 @@ responses are stubbed fail-closed so a real token never reaches the agent.
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode
 
 from mitmproxy import http
 
 from token_store import OAuthBrokerAddon
 
-logger = logging.getLogger(__name__)
-
-TOKEN_HOST = "github.com"
-TOKEN_PATH = "/login/oauth/access_token"
+# OpenCode and Pi use different GitHub OAuth apps for Copilot. The token
+# endpoint is shared, so the capture addon must recognize both client IDs.
+COPILOT_CLIENT_IDS = {
+    "Ov23li8tweQw6odWQebz",  # OpenCode
+    "Iv1.b507a08c87ecfe98",  # Pi
+}
 API_HOST = "api.githubcopilot.com"
 INDIVIDUAL_API_HOST = "api.individual.githubcopilot.com"
 API_HOSTS = {API_HOST, INDIVIDUAL_API_HOST}
@@ -105,56 +105,12 @@ class GitHubCopilotAuthInterceptor(OAuthBrokerAddon):
         if flow.response is None:
             return
 
-        if self._is_token_request(flow.request):
-            self._sanitize_oauth_response(flow.response)
-        elif self._is_token_exchange_request(flow.request):
+        if self._is_token_exchange_request(flow.request):
             self._sanitize_session_response(flow.response)
 
-    def _sanitize_oauth_response(self, response: http.Response) -> None:
-        if not response.content:
-            return
-
-        content_type = response.headers.get("content-type", "").lower()
-        if "json" in content_type:
-            if not self._capture_json_oauth_token(response):
-                self._block(response, "OAuth token response could not be sanitized")
-        elif "application/x-www-form-urlencoded" in content_type:
-            self._capture_form_oauth_token(response)
-        else:
-            # Unknown format from the OAuth endpoint could carry the token in a
-            # shape we do not stub; never forward it to the agent.
-            self._block(response, "OAuth token response could not be sanitized")
-
-    def _capture_json_oauth_token(self, response: http.Response) -> bool:
-        body = self._parse_json_object(response)
-        if body is None:
-            return False
-
-        access_token = body.get("access_token")
-        if isinstance(access_token, str) and access_token:
-            self._access_token = access_token
-            body["access_token"] = STUB_ACCESS_TOKEN
-            self._persist_token()
-            response.text = json.dumps(body)
-        return True
-
-    def _capture_form_oauth_token(self, response: http.Response) -> None:
-        fields = parse_qsl(response.get_text(), keep_blank_values=True)
-        access_token = next(
-            (value for key, value in fields if key == "access_token" and value),
-            None,
-        )
-        if access_token is None:
-            return
-
-        self._access_token = access_token
+    def set_access_token(self, token: str) -> None:
+        self._access_token = token
         self._persist_token()
-        response.text = urlencode(
-            [
-                (key, STUB_ACCESS_TOKEN if key == "access_token" else value)
-                for key, value in fields
-            ]
-        )
 
     def _sanitize_session_response(self, response: http.Response) -> None:
         if not response.content:
@@ -210,13 +166,6 @@ class GitHubCopilotAuthInterceptor(OAuthBrokerAddon):
         return (
             request.host == TOKEN_EXCHANGE_HOST
             and request.path.startswith(TOKEN_EXCHANGE_PATH_PREFIX)
-        )
-
-    @staticmethod
-    def _is_token_request(request: http.Request) -> bool:
-        return (
-            request.host == TOKEN_HOST
-            and request.path.split("?", 1)[0] == TOKEN_PATH
         )
 
     def _persist_token(self) -> None:

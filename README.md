@@ -7,6 +7,7 @@ Included tools:
 - `opencode`
 - `pi`
 - `.NET SDK`
+- `gh` (GitHub CLI)
 
 The main entry point is the `ai-buddy` script.
 
@@ -66,6 +67,22 @@ Your project directory will then be available inside the container at `/workspac
 
 Compose mounts `~/.gitconfig` from the host read-only into the container so Git commits use your existing author configuration. The file must exist before starting AI Buddy.
 
+## Private NuGet Feed (GitHub Packages)
+
+Run `gh auth login --scopes read:packages` once inside the container (device flow, confirm in your host browser), then register the feed:
+
+```bash
+dotnet nuget add source https://nuget.pkg.github.com/<OWNER>/index.json \
+  --name <SOURCE_NAME> \
+  --username ai-buddy \
+  --password "$(gh auth token)" \
+  --store-password-in-clear-text
+```
+
+`--name` must exactly match the `key` of that source in your project's `NuGet.config` (e.g. `galaxus_github`) — NuGet looks up stored credentials by source name, so a mismatched `--name` silently registers unused credentials and restore still fails with a 401.
+
+`gh auth token` only ever prints a placeholder; the proxy swaps it for the real token only on the way to `nuget.pkg.github.com`, so the real credential never touches `NuGet.Config` on disk. `--store-password-in-clear-text` is required on Linux (NuGet's alternative encryption is Windows-only) and is safe here since only the placeholder is stored. Both the `gh` login state and the NuGet source registration persist in the `agent-home` volume, so this is a one-time setup per host.
+
 ## Network Isolation & Proxy
 
 The agent container is attached only to an internal Docker network (`agent-net`, subnet `100.100.0.0/24`) with no direct route to the internet. The `proxy` service is the only container attached to both that network and an externally routed network.
@@ -75,7 +92,7 @@ mitmproxy provides two listeners on its static IP `100.100.0.10`:
 - TCP `8080` is the regular HTTP/HTTPS proxy selected through `HTTP_PROXY` and `HTTPS_PROXY`.
 - TCP/UDP `53` is the DNS server selected through the container's DNS configuration.
 
-TLS is intercepted so HTTP, HTTPS, and DNS traffic can be inspected with mitmproxy. For Claude Code and OpenCode's GitHub Copilot provider, the proxy captures real OAuth tokens, persists them in a proxy-only volume, and replaces them with placeholder tokens before responses reach the agent. It restores the real tokens only on requests whose actual upstream host (the connection target, not the spoofable `Host` header) is the corresponding API or OAuth endpoint. Requests to those hosts that carry any bearer other than the expected placeholder are rejected, and a token response the proxy cannot safely stub is blocked rather than forwarded, so a real token never reaches the agent.
+TLS is intercepted so HTTP, HTTPS, and DNS traffic can be inspected with mitmproxy. For Claude Code, OpenCode's and Pi's GitHub Copilot providers, and GitHub CLI's device-flow login, the proxy captures real OAuth tokens, persists them in a proxy-only volume, and replaces them with placeholder tokens before responses reach the agent. It restores the real tokens only on requests whose actual upstream host (the connection target, not the spoofable `Host` header) is the corresponding API or OAuth endpoint. For GitHub CLI specifically, that means `api.github.com` (REST/GraphQL, `token`/`Bearer` scheme) and, via HTTP Basic auth on the password field only, `github.com` (git-over-HTTPS) and `nuget.pkg.github.com` (the private NuGet feed); the corresponding username is passed through unchanged. Requests to those hosts that carry any credential other than the expected placeholder are rejected, and a token response the proxy cannot safely stub is blocked rather than forwarded, so a real token never reaches the agent. GitHub OAuth token responses for unknown client IDs are blocked for the same reason; add an explicit broker before using additional GitHub OAuth apps in the container.
 
 The proxy exports only its public CA certificate through a shared volume. The agent entrypoint installs that certificate into its system trust store before dropping privileges. Startup fails closed if the proxy or CA is not ready, and the CA private key remains in a proxy-only volume.
 
@@ -85,7 +102,7 @@ The proxy itself has unrestricted external connectivity. It can therefore reach 
 
 Notes:
 - Compose starts the proxy dependency automatically and waits for its healthcheck. The proxy keeps running after the agent session ends and is shared by parallel sessions.
-- Claude Code and GitHub Copilot credentials are shared globally by all agent sessions through the long-running proxy.
+- Claude Code, GitHub Copilot, and GitHub CLI credentials are shared globally by all agent sessions through the long-running proxy.
 - `/home/buddy` is persistent, including the agent CLI installations and their configuration. Rebuilding the image does not replace CLI files already present in an existing home volume.
 - If the host UID or GID changes, recreate the `agent-home` volume or correct its numeric ownership.
 - From the AI Buddy repository, stop it with `docker compose -f docker-compose.yml down`.

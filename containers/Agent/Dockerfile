@@ -4,7 +4,6 @@ ARG USER_UID=1000
 ARG USER_GID=1000
 ARG DOTNET_VERSION=10.0
 ARG DOTNET_INSTALL_DIR=/usr/share/dotnet
-ENV HOME=/home/buddy
 ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/ai-buddy-ca.crt
 
 # Install system dependencies
@@ -24,6 +23,18 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && rm -rf /var/lib/apt/lists/* \
     && node --version \
     && npm --version
+
+# Install GitHub CLI (official apt repo) for `gh auth login` / the private NuGet feed.
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/* \
+    && gh --version
 
 # Create non-root user
 RUN groupadd -g ${USER_GID} buddy \
@@ -46,6 +57,7 @@ RUN mkdir -p ${DOTNET_INSTALL_DIR} \
 # Install the agent CLIs as the unprivileged user.
 USER buddy
 ENV PATH="/home/buddy/.local/bin:/home/buddy/.opencode/bin:${PATH}"
+ENV HOME=/home/buddy
 
 RUN curl -fsSL https://opencode.ai/install | bash \
     && opencode --version

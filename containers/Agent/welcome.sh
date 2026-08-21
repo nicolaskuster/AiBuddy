@@ -17,8 +17,9 @@ cat << EOF
   
    📦  Installed SDKs: .NET $DOTNET_VERSION
 
-   🔧  Installed CLIs Agents - Ready to Use:
+   🔧  Installed CLIs - Ready to Use:
       • Claude CLI    → claude
+      • GitHub CLI    → gh
       • OpenCode CLI  → opencode
       • Pi CLI        → pi
 
