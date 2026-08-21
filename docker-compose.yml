@@ -4,9 +4,6 @@ services:
   agent:
     build:
       context: containers/Agent/
-      args:
-        USER_UID: "${USER_UID:-1000}"
-        USER_GID: "${USER_GID:-1000}"
     environment:
       HTTP_PROXY: http://100.100.0.10:8080
       http_proxy: http://100.100.0.10:8080
@@ -17,12 +14,6 @@ services:
     volumes:
       - agent-home:/home/buddy
       - proxy-ca:/run/ai-buddy-ca:ro
-      - type: bind
-        source: ${HOME}/.gitconfig
-        target: /home/buddy/.gitconfig
-        read_only: true
-        bind:
-          create_host_path: false
     depends_on:
       proxy:
         condition: service_healthy
@@ -33,6 +24,18 @@ services:
     init: true
     security_opt:
       - no-new-privileges:true
+    # Only the root phase of entrypoint.sh uses these: SETUID/SETGID for the
+    # runuser drop to buddy, CHOWN/FOWNER/DAC_OVERRIDE for aligning buddy with
+    # the workspace owner. Once runuser hands over, the non-root session holds
+    # no capabilities and no-new-privileges keeps it from regaining them.
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - CHOWN
+      - FOWNER
+      - DAC_OVERRIDE
 
   proxy:
     build:

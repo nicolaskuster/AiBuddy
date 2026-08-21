@@ -1,10 +1,14 @@
 FROM debian:bookworm-slim
 
-ARG USER_UID=1000
-ARG USER_GID=1000
 ARG DOTNET_VERSION=10.0
 ARG DOTNET_INSTALL_DIR=/usr/share/dotnet
-ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/ai-buddy-ca.crt
+# Trust the proxy CA everywhere. Node reads its own variable; Python tooling
+# (pip, requests, httpx) ships its own CA bundle and ignores the system store,
+# so it needs to be pointed at the bundle entrypoint.sh regenerates.
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/ai-buddy-ca.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 
 # Install system dependencies
 RUN apt-get update \
@@ -13,8 +17,11 @@ RUN apt-get update \
         ca-certificates \
         curl \
         git \
+        jq \
+        less \
         libicu72 \
         procps \
+        unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Node.js for the Pi coding agent.
@@ -24,21 +31,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && node --version \
     && npm --version
 
-# Install GitHub CLI (official apt repo) for `gh auth login` / the private NuGet feed.
-RUN mkdir -p -m 755 /etc/apt/keyrings \
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gh \
-    && rm -rf /var/lib/apt/lists/* \
-    && gh --version
-
-# Create non-root user
-RUN groupadd -g ${USER_GID} buddy \
-    && useradd -m -u ${USER_UID} -g ${USER_GID} -s /bin/bash buddy
+# Create non-root user. The UID is fixed here and adjusted at container start to
+# match whoever owns the mounted workspace (see entrypoint.sh), which keeps the
+# image itself independent of the host it was built on.
+RUN groupadd -g 1000 buddy \
+    && useradd -m -u 1000 -g 1000 -s /bin/bash buddy
 
 # Welcome message (system-wide hook)
 COPY --chmod=755 welcome.sh /usr/local/bin/welcome.sh
@@ -55,17 +52,34 @@ RUN mkdir -p ${DOTNET_INSTALL_DIR} \
     && dotnet --version
 
 # Install the agent CLIs as the unprivileged user.
+#
+# The installers are pointed at ${AI_BUDDY_TOOLS} rather than /home/buddy on
+# purpose: docker-compose.yml mounts the persistent agent-home volume over
+# /home/buddy, and Docker seeds a named volume from the image only while that
+# volume is still empty. Installing into $HOME would let the volume shadow the
+# image copies from the second start onwards, so `ai-buddy build` would never
+# deliver a CLI update again. Tools therefore live in the image; only config,
+# credentials and session history live in the volume.
+ENV AI_BUDDY_TOOLS=/opt/ai-buddy
+RUN mkdir -p ${AI_BUDDY_TOOLS} && chown buddy:buddy ${AI_BUDDY_TOOLS}
+
 USER buddy
-ENV PATH="/home/buddy/.local/bin:/home/buddy/.opencode/bin:${PATH}"
+# /home/buddy/.local/bin stays first so a CLI that updates itself into the
+# persistent home wins over the image copy underneath it.
+ENV PATH="/home/buddy/.local/bin:${AI_BUDDY_TOOLS}/.local/bin:${AI_BUDDY_TOOLS}/.opencode/bin:${PATH}"
 ENV HOME=/home/buddy
 
-RUN curl -fsSL https://opencode.ai/install | bash \
+# HOME must prefix `bash`, not `curl` — in a pipeline the assignment only
+# applies to the command it precedes. The version check afterwards deliberately
+# runs with the real runtime HOME to catch installers that bake $HOME into
+# their launcher scripts.
+RUN curl -fsSL https://opencode.ai/install | HOME=${AI_BUDDY_TOOLS} bash \
     && opencode --version
 
-RUN curl -fsSL https://pi.dev/install.sh | bash \
+RUN curl -fsSL https://pi.dev/install.sh | HOME=${AI_BUDDY_TOOLS} bash \
     && pi --version
 
-RUN curl -fsSL https://claude.ai/install.sh | bash \
+RUN curl -fsSL https://claude.ai/install.sh | HOME=${AI_BUDDY_TOOLS} bash \
     && claude --version
 
 USER root
