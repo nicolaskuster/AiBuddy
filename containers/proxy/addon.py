@@ -6,15 +6,6 @@ import asyncio
 import logging
 from pathlib import Path
 
-import github_oauth
-from claude_code_auth import ClaudeCodeAuthInterceptor
-from github_cli_auth import GitHubCliAuthInterceptor
-from github_cli_auth import GH_CLI_CLIENT_ID
-from github_cli_auth import STUB_ACCESS_TOKEN as GH_CLI_STUB_ACCESS_TOKEN
-from github_copilot_auth import COPILOT_CLIENT_IDS
-from github_copilot_auth import GitHubCopilotAuthInterceptor
-from github_copilot_auth import STUB_ACCESS_TOKEN as COPILOT_STUB_ACCESS_TOKEN
-
 logger = logging.getLogger(__name__)
 
 MITM_CA_CERT = Path("/home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem")
@@ -69,28 +60,4 @@ class PublicCaExporter:
             self._export_task.cancel()
 
 
-github_copilot = GitHubCopilotAuthInterceptor()
-github_cli = GitHubCliAuthInterceptor()
-
-github_oauth_clients = {
-    GH_CLI_CLIENT_ID: github_oauth.GitHubOAuthClient(
-        label="GitHub CLI",
-        stub_access_token=GH_CLI_STUB_ACCESS_TOKEN,
-        accept_access_token=github_cli.set_access_token,
-    ),
-}
-
-for client_id in COPILOT_CLIENT_IDS:
-    github_oauth_clients[client_id] = github_oauth.GitHubOAuthClient(
-        label="GitHub Copilot",
-        stub_access_token=COPILOT_STUB_ACCESS_TOKEN,
-        accept_access_token=github_copilot.set_access_token,
-    )
-
-addons = [
-    PublicCaExporter(),
-    ClaudeCodeAuthInterceptor(),
-    github_copilot,
-    github_cli,
-    github_oauth.GitHubOAuthCapture(github_oauth_clients),
-]
+addons = [PublicCaExporter()]

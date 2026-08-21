@@ -81,7 +81,7 @@ dotnet nuget add source https://nuget.pkg.github.com/<OWNER>/index.json \
 
 `--name` must exactly match the `key` of that source in your project's `NuGet.config` (e.g. `galaxus_github`) — NuGet looks up stored credentials by source name, so a mismatched `--name` silently registers unused credentials and restore still fails with a 401.
 
-`gh auth token` only ever prints a placeholder; the proxy swaps it for the real token only on the way to `nuget.pkg.github.com`, so the real credential never touches `NuGet.Config` on disk. `--store-password-in-clear-text` is required on Linux (NuGet's alternative encryption is Windows-only) and is safe here since only the placeholder is stored. Both the `gh` login state and the NuGet source registration persist in the `agent-home` volume, so this is a one-time setup per host.
+`gh auth token` prints the real token, and the `gh` login state as well as the NuGet source registration persist in the `agent-home` volume, so this is a one-time setup per host.
 
 ## Network Isolation & Proxy
 
@@ -92,7 +92,7 @@ mitmproxy provides two listeners on its static IP `100.100.0.10`:
 - TCP `8080` is the regular HTTP/HTTPS proxy selected through `HTTP_PROXY` and `HTTPS_PROXY`.
 - TCP/UDP `53` is the DNS server selected through the container's DNS configuration.
 
-TLS is intercepted so HTTP, HTTPS, and DNS traffic can be inspected with mitmproxy. For Claude Code, OpenCode's and Pi's GitHub Copilot providers, and GitHub CLI's device-flow login, the proxy captures real OAuth tokens, persists them in a proxy-only volume, and replaces them with placeholder tokens before responses reach the agent. It restores the real tokens only on requests whose actual upstream host (the connection target, not the spoofable `Host` header) is the corresponding API or OAuth endpoint. For GitHub CLI specifically, that means `api.github.com` (REST/GraphQL, `token`/`Bearer` scheme) and, via HTTP Basic auth on the password field only, `github.com` (git-over-HTTPS) and `nuget.pkg.github.com` (the private NuGet feed); the corresponding username is passed through unchanged. Requests to those hosts that carry any credential other than the expected placeholder are rejected, and a token response the proxy cannot safely stub is blocked rather than forwarded, so a real token never reaches the agent. GitHub OAuth token responses for unknown client IDs are blocked for the same reason; add an explicit broker before using additional GitHub OAuth apps in the container.
+TLS is intercepted so HTTP, HTTPS, and DNS traffic can be inspected with mitmproxy, but the proxy is currently a plain passthrough: it does not stub, capture, or block any credentials, and all traffic (including real OAuth tokens for Claude Code, GitHub Copilot, and GitHub CLI) is forwarded unmodified. Real credentials live directly in the agent container's own CLI config files, persisted in the `agent-home` volume, the same way they would without a proxy in front of them. TLS interception is kept in place as groundwork for a future, separate step that adds traffic metrics (request host/method/status/duration) exported via OpenTelemetry.
 
 The proxy exports only its public CA certificate through a shared volume. The agent entrypoint installs that certificate into its system trust store before dropping privileges. Startup fails closed if the proxy or CA is not ready, and the CA private key remains in a proxy-only volume.
 
@@ -102,15 +102,11 @@ The proxy itself has unrestricted external connectivity. It can therefore reach 
 
 Notes:
 - Compose starts the proxy dependency automatically and waits for its healthcheck. The proxy keeps running after the agent session ends and is shared by parallel sessions.
-- Claude Code, GitHub Copilot, and GitHub CLI credentials are shared globally by all agent sessions through the long-running proxy.
+- Claude Code, GitHub Copilot, and GitHub CLI credentials are shared globally by all agent sessions through the persistent `agent-home` volume.
 - `/home/buddy` is persistent, including the agent CLI installations and their configuration. Rebuilding the image does not replace CLI files already present in an existing home volume.
 - If the host UID or GID changes, recreate the `agent-home` volume or correct its numeric ownership.
 - From the AI Buddy repository, stop it with `docker compose -f docker-compose.yml down`.
 - From the AI Buddy repository, inspect traffic with `docker compose -f docker-compose.yml logs proxy`.
-
-Scope of the guarantee: "secretless" here means the real secret bytes never live inside the agent container — the goal is that the agent cannot learn its own credentials. It is not a sandbox against a compromised or prompt-injected agent: egress is intentionally unrestricted, so the agent can still use the credential's *capabilities* through the proxy and can exfiltrate other data it can read (workspace contents, etc.). The token *values* are what stays protected.
-
-The interceptors are fail-closed on the paths that could leak a token value: injection is gated on the real upstream host, non-placeholder bearers on an authorized host are rejected, and token responses that cannot be safely stubbed are blocked. Remaining follow-up: existing real credentials that may already sit in a persistent `agent-home` volume from before this scheme should be migrated out, and credentials remain shared globally across all agent sessions through the long-running proxy.
 
 ## Quick Reference
 
