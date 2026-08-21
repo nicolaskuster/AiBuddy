@@ -7,6 +7,7 @@ Included tools:
 - `opencode`
 - `pi`
 - `.NET SDK`
+- Docker CLI connected to an isolated rootless Docker engine
 
 The main entry point is the `ai-buddy` script.
 
@@ -30,9 +31,10 @@ Start the container in your current directory:
 ```
 
 Important:
-- `build` builds the agent and proxy images via `docker compose`.
+- `build` builds the agent image. Docker Compose pulls the latest stable rootless Docker engine image when needed.
 - `start` always mounts your current directory into the container as `/workspace`.
 - That means you can run `ai-buddy start` from any project directory.
+- The setup supports one active AI Buddy session at a time. Concurrent starts are not blocked and would share the same Docker engine.
 
 ## Add It To Your PATH
 
@@ -62,7 +64,7 @@ ai-buddy start
 
 Your project directory will then be available inside the container at `/workspace`.
 
-The container adapts to whoever owns that directory: the image ships its `buddy` user as UID 1000, and the entrypoint moves it to the owner of the mounted `/workspace` at startup. Files the agent creates therefore belong to you on the host, whatever your UID is, and the same image works on any host.
+`start_buddy.sh` passes your numeric UID/GID to Compose, so the agent process owns files it creates in the bind-mounted workspace. Before the agent starts, a short-lived `init-home` service aligns the persistent `/home/buddy` volume with the same IDs. The agent itself starts directly as that unprivileged user and never needs root or additional capabilities.
 
 ## Private NuGet Feed (GitHub Packages)
 
@@ -82,44 +84,33 @@ Three things here are easy to get wrong:
 
 To point at a different feed, change the source in your project's `NuGet.config` and rename the variable in `scripts/start_buddy.sh` to match.
 
-## Network Isolation & Proxy
+## Docker & Testcontainers
 
-The agent container is attached only to an internal Docker network (`agent-net`, subnet `100.100.0.0/24`) with no direct route to the internet. The `proxy` service is the only container attached to both that network and an externally routed network.
+`ai-buddy start` starts the latest stable `docker:dind-rootless` sidecar. The Docker CLI and Testcontainers clients in the agent connect to it through `tcp://docker-engine:2375` on the private Compose network. The API is not published on the host, and the host Docker socket is never mounted.
 
-mitmproxy provides two listeners on its static IP `100.100.0.10`:
+The engine is rootless internally, but Docker currently requires its outer sidecar container to run with `privileged: true`. This is a materially safer boundary than giving the agent the host Docker socket: agent code controls only the nested engine, which has no host paths, agent credentials, or agent home mounted into it. It is not equivalent to VM isolation against malicious code that can exploit the kernel.
 
-- TCP `8080` is the regular HTTP/HTTPS proxy selected through `HTTP_PROXY` and `HTTPS_PROXY`.
-- TCP/UDP `53` is the DNS server selected through the container's DNS configuration.
+The Docker engine data is persisted in a named volume, so subsequent sessions can reuse pulled images. Because the fixed Compose project supports only one active session, concurrent agents would share and could modify each other's Docker resources.
 
-TLS is intercepted, but the proxy is currently a plain passthrough: it does not stub, capture, or block anything, and all traffic (including the real Claude Code OAuth tokens) is forwarded unmodified. Nothing is persisted either — the only view of the traffic today is `docker compose logs proxy`, which is unstructured and rotates with Docker's default log settings. Real credentials live directly in the agent container's own CLI config files, persisted in the `agent-home` volume, the same way they would without a proxy in front of them.
+Testcontainers for .NET reads the preconfigured `DOCKER_HOST` and host override automatically. Ryuk remains enabled and receives the rootless daemon socket path through `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`, allowing it to clean resources after individual test runs during a long-lived agent session.
 
-TLS interception is kept in place as groundwork for a separate, future step that adds a collector for traffic metrics (request host/method/status/duration).
-
-The proxy exports only its public CA certificate through a shared volume. The agent entrypoint installs that certificate into its system trust store before dropping privileges. Startup fails closed if the proxy or CA is not ready, and the CA private key remains in a proxy-only volume.
-
-Applications which ignore the HTTP proxy variables still cannot connect directly to the internet because `agent-net` is internal. Their DNS traffic is sent through mitmproxy and is visible as DNS flows.
-
-The proxy itself has unrestricted external connectivity. It can therefore reach public internet services as well as other destinations reachable from the Docker host's network.
-
-### What the isolation does and does not cover
+### Security Boundaries
 
 The container boundary protects the host and the host network. It does not protect the credentials inside the container. Egress is unrestricted, the Claude Code tokens sit in the shared `agent-home` volume readable by every session in every project, and the NuGet feed token is in the process environment where anything can read it out of `/proc`. Everything running in the container can therefore reach those tokens and send them anywhere. Closing that gap is what the future egress policy step is for; until then, treat every credential the container can see as exposed to whatever the agents run.
 
 Passing the NuGet token through the container environment is not a security boundary — it only keeps the credential out of the persistent volume, so it goes away with the session and is re-supplied from your host login on the next start. Note also that it is passed on the `docker compose` command line, so it is visible in `/proc/<pid>/cmdline` to any local user on the host for as long as the session runs.
 
-Further boundaries worth knowing:
-
-- **Git over SSH does not work, by design.** `agent-net` is internal and SSH cannot use an HTTP proxy, so SSH remotes have no route out. Use HTTPS remotes.
-- **The Docker socket is deliberately not mounted.** There is no Docker-in-Docker; an agent cannot start sibling containers or escape through the daemon.
-- **Build traffic does not go through the proxy.** `docker build` uses the host network, and the CA does not even exist at that point. "All traffic goes through the proxy" holds at runtime, not at image build time.
+- **The host Docker socket is deliberately not mounted.** The agent can control only the rootless DinD engine. Since the sidecar is privileged, this improves isolation but is not a hard VM-like security boundary.
+- **The Docker API is unencrypted.** It is reachable only within the Compose network and is not exposed as a host port. Any container attached to that network can control the nested engine.
+- **Network access is unrestricted.** The agent and nested Docker engine can connect directly to destinations reachable from the Docker host.
 
 Notes:
-- Compose starts the proxy dependency automatically and waits for its healthcheck. The proxy keeps running after the agent session ends and is shared by parallel sessions.
+- The image contains a build-time `buddy` user with UID/GID 1000, but Compose overrides those numeric IDs at runtime. On hosts with different IDs, some tools may display the user numerically because `/etc/passwd` is not modified.
+- Compose starts the Docker dependency automatically and waits for its healthcheck. Containers are stopped when the agent exits; named volumes remain available for the next session.
 - Agent CLI credentials are shared globally by all agent sessions through the persistent `agent-home` volume. Logging into the same CLI from two parallel sessions can overwrite the other session's state.
 - Tools and configuration are split: the CLIs are installed in the image under `/opt/ai-buddy`, while `/home/buddy` is a persistent volume holding configuration, credentials, session history, and plans. `ai-buddy build` therefore delivers CLI updates without touching your logins. On a host whose UID is not 1000, `/opt/ai-buddy` is not writable for the session, so CLIs cannot update themselves in place — updates come from `ai-buddy build`.
 - Git is installed but not configured: there is no identity, so `git commit` fails until you set one, and there is no credential helper, so pushing needs credentials you supply yourself. Reading history (`log`, `diff`, `status`, `fetch` over HTTPS) works out of the box. Both are one-time `git config --global` fixes that land in the persistent volume.
-- From the AI Buddy repository, stop it with `docker compose -f docker-compose.yml down`.
-- From the AI Buddy repository, inspect traffic with `docker compose -f docker-compose.yml logs proxy`.
+- `ai-buddy start` stops its Compose services automatically when the agent exits.
 
 ## Quick Reference
 

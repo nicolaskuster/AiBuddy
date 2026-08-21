@@ -1,75 +1,62 @@
 name: ai-buddy
 
 services:
-  agent:
-    build:
-      context: containers/Agent/
+  init-home:
+    image: ai-buddy-agent
+    user: root
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - chown -R "$$HOST_UID:$$HOST_GID" /home/buddy
     environment:
-      HTTP_PROXY: http://100.100.0.10:8080
-      http_proxy: http://100.100.0.10:8080
-      HTTPS_PROXY: http://100.100.0.10:8080
-      https_proxy: http://100.100.0.10:8080
-      NO_PROXY: localhost,127.0.0.1
-      no_proxy: localhost,127.0.0.1
+      HOST_UID: ${HOST_UID:-1000}
+      HOST_GID: ${HOST_GID:-1000}
     volumes:
       - agent-home:/home/buddy
-      - proxy-ca:/run/ai-buddy-ca:ro
+
+  agent:
+    image: ai-buddy-agent
+    build:
+      context: containers/Agent/
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+    environment:
+      HOME: /home/buddy
+      DOCKER_HOST: tcp://docker-engine:2375
+      TESTCONTAINERS_HOST_OVERRIDE: docker-engine
+      TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE: /run/user/1000/docker.sock
+    volumes:
+      - agent-home:/home/buddy
     depends_on:
-      proxy:
+      init-home:
+        condition: service_completed_successfully
+      docker-engine:
         condition: service_healthy
-    networks:
-      agent-net:
-    dns:
-      - 100.100.0.10
     init: true
     security_opt:
       - no-new-privileges:true
-    # Only the root phase of entrypoint.sh uses these: SETUID/SETGID for the
-    # runuser drop to buddy, CHOWN/FOWNER/DAC_OVERRIDE for aligning buddy with
-    # the workspace owner. Once runuser hands over, the non-root session holds
-    # no capabilities and no-new-privileges keeps it from regaining them.
     cap_drop:
       - ALL
-    cap_add:
-      - SETUID
-      - SETGID
-      - CHOWN
-      - FOWNER
-      - DAC_OVERRIDE
 
-  proxy:
-    build:
-      context: containers/proxy/
+  docker-engine:
+    image: docker:dind-rootless
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""
     volumes:
-      - proxy-config:/home/mitmproxy/.mitmproxy
-      - proxy-ca:/home/mitmproxy/.mitmproxy-public
-    networks:
-      agent-net:
-        ipv4_address: 100.100.0.10
-      proxy-net:
+      - docker-data:/home/rootless/.local/share/docker
     healthcheck:
       test:
-        - CMD-SHELL
-        - >-
-          cmp -s /home/mitmproxy/.mitmproxy/mitmproxy-ca-cert.pem
-          /home/mitmproxy/.mitmproxy-public/ai-buddy-ca.crt &&
-          python -c "import socket; [socket.create_connection(('127.0.0.1', port), 1).close() for port in (53, 8080)]"
+        - CMD
+        - docker
+        - --host=unix:///run/user/1000/docker.sock
+        - info
       interval: 2s
-      timeout: 2s
-      retries: 15
-      start_period: 2s
-
-networks:
-  agent-net:
-    driver: bridge
-    internal: true
-    ipam:
-      config:
-        - subnet: 100.100.0.0/24
-  proxy-net:
-    driver: bridge
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    init: true
 
 volumes:
   agent-home:
-  proxy-ca:
-  proxy-config:
+  docker-data:
