@@ -1,38 +1,40 @@
 name: ai-buddy
 
 services:
-  init-home:
-    image: ai-buddy-agent
-    user: root
-    entrypoint:
-      - /bin/sh
-      - -c
-    command:
-      - chown -R "$$HOST_UID:$$HOST_GID" /home/buddy
-    environment:
-      HOST_UID: ${HOST_UID:-1000}
-      HOST_GID: ${HOST_GID:-1000}
-    volumes:
-      - agent-home:/home/buddy
-
   agent:
     image: ai-buddy-agent
     build:
       context: containers/Agent/
-    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+      args:
+        USER_UID: ${HOST_UID:-1000}
+        USER_GID: ${HOST_GID:-1000}
+        DOTNET_VERSION: "11.0"
     environment:
-      HOME: /home/buddy
-      DOCKER_HOST: tcp://docker-engine:2375
+      DOCKER_HOST: unix:///docker-socket/docker.sock
+      # Published ports of test containers live in the docker-engine container,
+      # not on the agent's localhost.
       TESTCONTAINERS_HOST_OVERRIDE: docker-engine
-      TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE: /run/user/1000/docker.sock
+      # Socket path as seen by the daemon; Ryuk bind-mounts it from there.
+      TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE: /docker-socket/docker.sock
+      XDG_CONFIG_HOME: /state/config
+      XDG_DATA_HOME: /state/data
+      XDG_STATE_HOME: /state/state
+      XDG_CACHE_HOME: /state/cache
+      PI_CODING_AGENT_DIR: /state/pi/agent
+      PI_CODING_AGENT_SESSION_DIR: /state/pi/sessions
+      CLAUDE_CONFIG_DIR: /state/claude
     volumes:
-      - agent-home:/home/buddy
+      - agent-state:/state
+      - docker-socket:/docker-socket
     depends_on:
-      init-home:
-        condition: service_completed_successfully
       docker-engine:
         condition: service_healthy
+    # The rootless daemon owns the socket as 1000:1000; lets a host UID != 1000 use it.
+    group_add:
+      - "1000"
     init: true
+    stdin_open: true
+    tty: true
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -42,21 +44,31 @@ services:
     image: docker:dind-rootless
     privileged: true
     environment:
-      DOCKER_TLS_CERTDIR: ""
+      # Only for the healthcheck CLI. The rootlesskit runtime dir stays internal;
+      # just the socket is placed in the shared volume via --host.
+      DOCKER_HOST: unix:///docker-socket/docker.sock
+    command:
+      - dockerd
+      - --host=unix:///docker-socket/docker.sock
     volumes:
       - docker-data:/home/rootless/.local/share/docker
+      - docker-socket:/docker-socket
     healthcheck:
       test:
         - CMD
         - docker
-        - --host=unix:///run/user/1000/docker.sock
         - info
-      interval: 2s
+      interval: 5s
       timeout: 5s
-      retries: 30
-      start_period: 5s
-    init: true
+      retries: 20
+      start_period: 10s
 
 volumes:
-  agent-home:
+  agent-state:
   docker-data:
+  docker-socket:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=16m,uid=1000,gid=1000,mode=0750"

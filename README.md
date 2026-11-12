@@ -7,7 +7,8 @@ Included tools:
 - `opencode`
 - `pi`
 - `.NET SDK`
-- Docker CLI connected to an isolated rootless Docker engine
+- `Node.js`
+- Docker CLI with `buildx` and `compose` plugins, connected to an isolated rootless Docker engine
 
 The main entry point is the `ai-buddy` script.
 
@@ -31,7 +32,7 @@ Start the container in your current directory:
 ```
 
 Important:
-- `build` builds the agent image. Docker Compose pulls the latest stable rootless Docker engine image when needed.
+- `build` builds the agent image for your machine. Docker Compose pulls the latest stable rootless Docker engine image when needed.
 - `start` always mounts your current directory into the container as `/workspace`.
 - That means you can run `ai-buddy start` from any project directory.
 - The setup supports one active AI Buddy session at a time. Concurrent starts are not blocked and would share the same Docker engine.
@@ -64,53 +65,58 @@ ai-buddy start
 
 Your project directory will then be available inside the container at `/workspace`.
 
-`start_buddy.sh` passes your numeric UID/GID to Compose, so the agent process owns files it creates in the bind-mounted workspace. Before the agent starts, a short-lived `init-home` service aligns the persistent `/home/buddy` volume with the same IDs. The agent itself starts directly as that unprivileged user and never needs root or additional capabilities.
+## Image Build
 
-## Private NuGet Feed (GitHub Packages)
+The image is built on each machine and is not meant to be portable. `ai-buddy build` passes your numeric UID/GID (`id -u` / `id -g`) as build args, so the `buddy` user in the image matches your host user and files created in the bind-mounted workspace belong to you. If `ai-buddy start` has to build the image implicitly (no image yet), the defaults `1000:1000` are used — run `ai-buddy build` first.
 
-There is no setup step inside the container. The feed itself is declared in your project's own `NuGet.config`, and the credentials are injected for the lifetime of the session: `start_buddy.sh` runs `gh auth token` on the host and hands the result to `docker compose run` as
+The .NET SDK version is a build arg as well, set in `docker-compose.yml` (`DOTNET_VERSION`, currently `11.0`; the newest SDK of that version is installed). Node.js comes in version 24 from NodeSource, the base image is `debian:trixie-slim`.
 
-```
--e NuGetPackageSourceCredentials_galaxus_github=Username=ai-buddy;Password=<token>
-```
+## Persistence
 
-The GitHub CLI therefore only has to be installed and logged in on your machine — it is deliberately not part of the image. The token exists only in that container's environment: it is never written to a volume, never stored in a `NuGet.config`, and gone when the session ends.
+The CLIs and `/home/buddy` are part of the image, so `ai-buddy build` delivers CLI updates and anything else written to `$HOME` is discarded when the session ends.
 
-Three things here are easy to get wrong:
+Configuration, credentials, session history and caches live in the named volume `agent-state`, mounted at `/state`. The tools are pointed there via environment variables in `docker-compose.yml`:
 
-- The suffix after `NuGetPackageSourceCredentials_` must exactly match the `key` of the source in your project's `NuGet.config`. NuGet looks up credentials by source name, so a mismatch means they are silently ignored and restore fails with a 401.
-- It must be `Password=`, not `ClearTextPassword=`. In this variable the value is used as-is; `ClearTextPassword=` is only recognised inside a `NuGet.config` file and is silently ignored here — again a 401.
-- If you are not logged in to `gh` on the host, the password is simply empty and restore fails with a 401 that says nothing about the real cause. Check with `gh auth status` when a restore starts failing out of nowhere.
+| Variable | Path |
+| --- | --- |
+| `XDG_CONFIG_HOME` | `/state/config` |
+| `XDG_DATA_HOME` | `/state/data` |
+| `XDG_STATE_HOME` | `/state/state` |
+| `XDG_CACHE_HOME` | `/state/cache` |
+| `CLAUDE_CONFIG_DIR` | `/state/claude` |
+| `PI_CODING_AGENT_DIR` | `/state/pi/agent` |
+| `PI_CODING_AGENT_SESSION_DIR` | `/state/pi/sessions` |
 
-To point at a different feed, change the source in your project's `NuGet.config` and rename the variable in `scripts/start_buddy.sh` to match.
+Tools that ignore these variables and write directly to `$HOME` (e.g. `~/.gitconfig`, `~/.nuget/packages`, shell history) are not persisted.
 
 ## Docker & Testcontainers
 
-`ai-buddy start` starts the latest stable `docker:dind-rootless` sidecar. The Docker CLI and Testcontainers clients in the agent connect to it through `tcp://docker-engine:2375` on the private Compose network. The API is not published on the host, and the host Docker socket is never mounted.
+`ai-buddy start` starts the latest stable `docker:dind-rootless` sidecar. The daemon listens only on a Unix socket, which it places in the shared `docker-socket` volume; the agent reaches it via `DOCKER_HOST=unix:///docker-socket/docker.sock`. There is no TCP API, nothing is published on the host, and the host Docker socket is never mounted. The rootlesskit runtime directory stays inside the sidecar — only the socket is shared.
 
-The engine is rootless internally, but Docker currently requires its outer sidecar container to run with `privileged: true`. This is a materially safer boundary than giving the agent the host Docker socket: agent code controls only the nested engine, which has no host paths, agent credentials, or agent home mounted into it. It is not equivalent to VM isolation against malicious code that can exploit the kernel.
+The `docker-socket` volume is a 16 MB tmpfs owned by the rootless daemon user (`1000:1000`, mode `0750`). The agent joins group `1000` (`group_add`), so the socket is usable even if your host UID is not 1000. Note that `driver_opts` only take effect when the volume is created; after changing them, remove it with `docker volume rm ai-buddy_docker-socket`.
 
-The Docker engine data is persisted in a named volume, so subsequent sessions can reuse pulled images. Because the fixed Compose project supports only one active session, concurrent agents would share and could modify each other's Docker resources.
+The engine is rootless internally, but Docker currently requires its outer sidecar container to run with `privileged: true`. This is a materially safer boundary than giving the agent the host Docker socket: agent code controls only the nested engine, which has no host paths or agent state mounted into it. It is not equivalent to VM isolation against malicious code that can exploit the kernel.
 
-Testcontainers for .NET reads the preconfigured `DOCKER_HOST` and host override automatically. Ryuk remains enabled and receives the rootless daemon socket path through `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`, allowing it to clean resources after individual test runs during a long-lived agent session.
+The Docker engine data is persisted in the `docker-data` volume, so subsequent sessions can reuse pulled images. Because the fixed Compose project supports only one active session, concurrent agents would share and could modify each other's Docker resources.
+
+`docker compose` and `docker buildx` are available in the agent and talk to the same nested engine. Bind mounts are resolved by the daemon, i.e. inside the `docker-engine` container, where `/workspace` does not exist — bind mounts from `/workspace` in `volumes:` will not contain your files. Use named volumes or `COPY` in a build instead; build contexts work normally because the CLI uploads them.
+
+Testcontainers needs two extra variables, both preset:
+
+- `TESTCONTAINERS_HOST_OVERRIDE=docker-engine` — published ports of test containers are bound inside the `docker-engine` container, not on the agent's `localhost`.
+- `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/docker-socket/docker.sock` — the socket path as seen by the daemon. Ryuk bind-mounts it from there to clean up resources after each test run.
 
 ### Security Boundaries
 
-The container boundary protects the host and the host network. It does not protect the credentials inside the container. Egress is unrestricted, the Claude Code tokens sit in the shared `agent-home` volume readable by every session in every project, and the NuGet feed token is in the process environment where anything can read it out of `/proc`. Everything running in the container can therefore reach those tokens and send them anywhere. Closing that gap is what the future egress policy step is for; until then, treat every credential the container can see as exposed to whatever the agents run.
-
-Passing the NuGet token through the container environment is not a security boundary — it only keeps the credential out of the persistent volume, so it goes away with the session and is re-supplied from your host login on the next start. Note also that it is passed on the `docker compose` command line, so it is visible in `/proc/<pid>/cmdline` to any local user on the host for as long as the session runs.
+The container boundary protects the host and the host network. It does not protect the credentials inside the container. Egress is unrestricted and the CLI credentials sit in the shared `agent-state` volume, readable by every session in every project. Everything running in the container can therefore reach those credentials and send them anywhere. Treat every credential the container can see as exposed to whatever the agents run.
 
 - **The host Docker socket is deliberately not mounted.** The agent can control only the rootless DinD engine. Since the sidecar is privileged, this improves isolation but is not a hard VM-like security boundary.
-- **The Docker API is unencrypted.** It is reachable only within the Compose network and is not exposed as a host port. Any container attached to that network can control the nested engine.
 - **Network access is unrestricted.** The agent and nested Docker engine can connect directly to destinations reachable from the Docker host.
 
 Notes:
-- The image contains a build-time `buddy` user with UID/GID 1000, but Compose overrides those numeric IDs at runtime. On hosts with different IDs, some tools may display the user numerically because `/etc/passwd` is not modified.
 - Compose starts the Docker dependency automatically and waits for its healthcheck. Containers are stopped when the agent exits; named volumes remain available for the next session.
-- Agent CLI credentials are shared globally by all agent sessions through the persistent `agent-home` volume. Logging into the same CLI from two parallel sessions can overwrite the other session's state.
-- Tools and configuration are split: the CLIs are installed in the image under `/opt/ai-buddy`, while `/home/buddy` is a persistent volume holding configuration, credentials, session history, and plans. `ai-buddy build` therefore delivers CLI updates without touching your logins. On a host whose UID is not 1000, `/opt/ai-buddy` is not writable for the session, so CLIs cannot update themselves in place — updates come from `ai-buddy build`.
-- Git is installed but not configured: there is no identity, so `git commit` fails until you set one, and there is no credential helper, so pushing needs credentials you supply yourself. Reading history (`log`, `diff`, `status`, `fetch` over HTTPS) works out of the box. Both are one-time `git config --global` fixes that land in the persistent volume.
-- `ai-buddy start` stops its Compose services automatically when the agent exits.
+- Agent CLI credentials are shared globally by all agent sessions through the `agent-state` volume. Logging into the same CLI from two parallel sessions can overwrite the other session's state.
+- Git is installed but not configured: there is no identity and no credential helper. Since `~/.gitconfig` is not persisted, configure Git via `$XDG_CONFIG_HOME/git/config` (`/state/config/git/config`) if it should survive the session.
 
 ## Quick Reference
 
